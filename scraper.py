@@ -437,7 +437,7 @@ def scrape_teleport(
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
             cwd=str(Path(__file__).parent),
         )
@@ -452,9 +452,16 @@ def scrape_teleport(
                 if progress_callback and "msg" in msg:
                     progress_callback(msg["msg"], float(msg.get("pct", 0)))
             except Exception:
-                pass  # non-JSON output (tracebacks, warnings) — ignore
+                pass  # non-JSON output — ignore
 
+        stderr_output = proc.stderr.read()
         proc.wait(timeout=290)
+
+        # Check if output file has content
+        file_size = os.path.getsize(output_file)
+        if file_size == 0:
+            error_detail = stderr_output.strip() if stderr_output.strip() else "Subprocesso encerrou sem gravar resultado."
+            return ScraperResult(success=False, message=f"Falha no worker:\n{error_detail}")
 
         with open(output_file, encoding="utf-8") as f:
             data = json.load(f)
