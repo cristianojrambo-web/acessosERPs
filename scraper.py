@@ -188,7 +188,11 @@ def _run_playwright(
     import asyncio
 
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # ProactorEventLoop é obrigatório no Windows para criar subprocessos
+        # (o SelectorEventLoop não suporta create_subprocess_exec)
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        loop = asyncio.ProactorEventLoop()
+        asyncio.set_event_loop(loop)
 
     from playwright.sync_api import sync_playwright
 
@@ -496,6 +500,12 @@ if __name__ == "__main__":
     import sys
     import json
     import argparse
+
+    # Garante ProactorEventLoop antes de qualquer importação do Playwright
+    if sys.platform == "win32":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
     parser = argparse.ArgumentParser(description="Teleport scraper worker")
     parser.add_argument("--worker", required=True, metavar="OUTPUT_FILE",
