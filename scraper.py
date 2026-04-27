@@ -397,24 +397,17 @@ def scrape_teleport(
 ) -> ScraperResult:
     """
     Faz login no Teleport ERP e extrai dados das seções indicadas.
-    Executa o Playwright em thread separada para compatibilidade com Windows/Streamlit.
+    Executa o Playwright em subprocesso separado para evitar conflito de
+    event loop asyncio com o Streamlit no Windows (NotImplementedError).
     """
-    try:
-        import playwright  # noqa: F401 — verify installed
-    except ImportError:
-        return ScraperResult(
-            success=False,
-            message=(
-                "Playwright não instalado.\n"
-                "Execute: pip install playwright && playwright install chromium"
-            ),
-        )
+    import sys
+    import subprocess
+    import tempfile
+    import json
+    import os
+    from pathlib import Path
 
-    username = TELEPORT_USERNAME
-    password = TELEPORT_PASSWORD
-    base_url = TELEPORT_URL.rstrip("/")
-
-    if not username or not password:
+    if not TELEPORT_USERNAME or not TELEPORT_PASSWORD:
         return ScraperResult(
             success=False,
             message=(
@@ -425,38 +418,110 @@ def scrape_teleport(
 
     to_scrape = [s for s in (sections or list(SECTIONS.keys())) if s in SECTIONS]
 
-    # Run in a dedicated thread so Playwright can create its own event loop
-    # without conflicting with Streamlit's asyncio loop (fixes NotImplementedError on Windows)
-    import threading
+    # Write result to a temp file so the subprocess can pass data back
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp.close()
+    output_file = tmp.name
 
-    holder: dict = {}
+    script = str(Path(__file__).resolve())
+    cmd = [
+        sys.executable, script,
+        "--worker", output_file,
+        "--max-rows", str(max_rows),
+    ]
+    if headless:
+        cmd.append("--headless")
+    cmd += to_scrape
 
-    def _target():
-        try:
-            holder["result"] = _run_playwright(
-                username=username,
-                password=password,
-                base_url=base_url,
-                to_scrape=to_scrape,
-                headless=headless,
-                max_rows=max_rows,
-                progress_callback=progress_callback,
-            )
-        except Exception as exc:
-            logger.exception("Erro na thread do scraper")
-            holder["result"] = ScraperResult(
-                success=False,
-                message=f"Erro interno: {type(exc).__name__}: {exc}",
-            )
-
-    t = threading.Thread(target=_target, daemon=True)
-    t.start()
-    t.join(timeout=300)  # 5-minute max
-
-    if "result" not in holder:
-        return ScraperResult(
-            success=False,
-            message="A importação demorou mais de 5 minutos e foi cancelada.",
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=str(Path(__file__).parent),
         )
 
-    return holder["result"]
+        # Stream progress lines from the subprocess stdout
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                if progress_callback and "msg" in msg:
+                    progress_callback(msg["msg"], float(msg.get("pct", 0)))
+            except Exception:
+                pass  # non-JSON output (tracebacks, warnings) — ignore
+
+        proc.wait(timeout=290)
+
+        with open(output_file, encoding="utf-8") as f:
+            data = json.load(f)
+
+        result = ScraperResult(
+            success=data.get("success", False),
+            message=data.get("message", ""),
+            errors=data.get("errors", {}),
+        )
+        for name, records in data.get("dataframes", {}).items():
+            result.dataframes[name] = pd.DataFrame(records)
+
+        return result
+
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return ScraperResult(success=False, message="A importação demorou mais de 5 minutos e foi cancelada.")
+    except FileNotFoundError as exc:
+        return ScraperResult(success=False, message=f"Arquivo de resultado não encontrado: {exc}")
+    except Exception as exc:
+        return ScraperResult(success=False, message=f"Erro ao executar importação: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            os.unlink(output_file)
+        except Exception:
+            pass
+
+
+# ── Worker entry point (called as subprocess) ──────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+    import json
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Teleport scraper worker")
+    parser.add_argument("--worker", required=True, metavar="OUTPUT_FILE",
+                        help="Path to JSON output file")
+    parser.add_argument("--headless", action="store_true", default=False)
+    parser.add_argument("--max-rows", type=int, default=500)
+    parser.add_argument("sections", nargs="*", default=list(SECTIONS.keys()))
+    args = parser.parse_args()
+
+    def _progress(msg: str, pct: float) -> None:
+        print(json.dumps({"msg": msg, "pct": pct}), flush=True)
+
+    res = _run_playwright(
+        username=TELEPORT_USERNAME,
+        password=TELEPORT_PASSWORD,
+        base_url=TELEPORT_URL.rstrip("/"),
+        to_scrape=[s for s in args.sections if s in SECTIONS],
+        headless=args.headless,
+        max_rows=args.max_rows,
+        progress_callback=_progress,
+    )
+
+    output = {
+        "success": res.success,
+        "message": res.message,
+        "errors": res.errors,
+        "dataframes": {
+            name: df.to_dict(orient="records")
+            for name, df in res.dataframes.items()
+        },
+    }
+
+    with open(args.worker, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, default=str)
+
+    sys.exit(0 if res.success else 1)
