@@ -332,6 +332,31 @@ def _run_playwright(
             report("Login realizado com sucesso!", 0.15)
             result.success = True
 
+            # ── Debug: captura estrutura de navegação após login ───────────────
+            try:
+                debug_dir = Path(__file__).parent
+                page.screenshot(path=str(debug_dir / "debug_login.png"))
+
+                all_links = page.eval_on_selector_all(
+                    "a",
+                    "els => els.map(el => ({text: el.innerText.trim(), href: el.href})).filter(l => l.text.length > 0)"
+                )
+                all_buttons = page.eval_on_selector_all(
+                    "button, [role='button'], [class*='menu-item'], [class*='nav-item']",
+                    "els => els.map(el => el.innerText.trim()).filter(t => t.length > 0)"
+                )
+                debug_info = {
+                    "url_pos_login": page.url,
+                    "titulo": page.title(),
+                    "links": all_links[:40],
+                    "botoes_e_menu": list(set(all_buttons))[:40],
+                }
+                with open(str(debug_dir / "debug_nav.json"), "w", encoding="utf-8") as _f:
+                    json.dump(debug_info, _f, ensure_ascii=False, indent=2)
+                report(f"Debug salvo em debug_login.png e debug_nav.json (URL: {page.url})", 0.16)
+            except Exception as _de:
+                logger.debug("Debug capture error: %s", _de)
+
             # ── Scrape each section ────────────────────────────────────────────
             n = len(to_scrape)
             for i, key in enumerate(to_scrape):
@@ -357,16 +382,22 @@ def _run_playwright(
                 # Try menu click first
                 navigated = _find_and_click_menu(page, sec["keywords"])
 
-                # Fallback: direct URL guesses
+                # Fallback: direct URL guesses (singular, plural, hash routing)
                 if not navigated:
                     for kw in sec["keywords"]:
+                        kw_plural = kw + "s" if not kw.endswith("s") else kw
                         for candidate in (
                             f"{base_url}/{kw}",
-                            f"{base_url}/#{kw}",
+                            f"{base_url}/{kw_plural}",
+                            f"{base_url}/#/{kw}",
+                            f"{base_url}/#/{kw_plural}",
+                            f"{base_url}/#!/{kw}",
+                            f"{base_url}/#!/{kw_plural}",
                         ):
                             try:
-                                page.goto(candidate, wait_until="networkidle", timeout=10_000)
-                                if kw in page.url.lower():
+                                page.goto(candidate, wait_until="domcontentloaded", timeout=10_000)
+                                _safe_wait(page, timeout=5_000)
+                                if kw in page.url.lower() or kw_plural in page.url.lower():
                                     navigated = True
                                     break
                             except Exception:
