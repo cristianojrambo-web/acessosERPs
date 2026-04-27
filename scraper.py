@@ -56,6 +56,15 @@ class ScraperResult:
 
 # ── DOM Helpers ────────────────────────────────────────────────────────────────
 
+def _safe_wait(page, timeout: int = 5_000) -> None:
+    """Waits for network idle, swallowing navigation-related errors."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except Exception:
+        pass
+    page.wait_for_timeout(1_000)
+
+
 def _find_and_click_menu(page, keywords: list[str]) -> bool:
     """Clicks the first visible nav link that matches any keyword."""
     for kw in keywords:
@@ -72,8 +81,13 @@ def _find_and_click_menu(page, keywords: list[str]) -> bool:
             try:
                 el = page.locator(sel).first
                 if el.is_visible(timeout=600):
-                    el.click()
-                    page.wait_for_load_state("networkidle", timeout=15_000)
+                    # Use expect_navigation to safely handle page transitions
+                    try:
+                        with page.expect_navigation(wait_until="networkidle", timeout=15_000):
+                            el.click()
+                    except Exception:
+                        # Navigation may have already completed — wait a bit
+                        page.wait_for_timeout(2_000)
                     return True
             except Exception:
                 continue
@@ -277,27 +291,43 @@ def _run_playwright(
             if not submitted:
                 page.locator("input[type='password']").first.press("Enter")
 
-            page.wait_for_load_state("networkidle", timeout=25_000)
-            page.wait_for_timeout(2_000)
+            # Wait for navigation to complete after login
+            login_url = page.url
+            try:
+                # Wait for URL to change (redirect after login)
+                page.wait_for_url(
+                    lambda url: url != login_url,
+                    timeout=25_000,
+                )
+            except Exception:
+                pass
+            _safe_wait(page, timeout=10_000)
 
-            # Detect login failure via visible error messages
-            error_els = page.query_selector_all(
-                "[class*='error']:visible, [class*='alert-danger']:visible, "
-                "[class*='invalid-feedback']:visible, .error:visible, #error:visible"
-            )
-            if error_els:
-                msg = error_els[0].inner_text().strip()
-                result.message = f"Erro de login: {msg}" if msg else "Credenciais inválidas."
-                return result
+            # Detect login failure — wrap in try/except in case context changes
+            try:
+                error_els = page.query_selector_all(
+                    "[class*='error'], [class*='alert-danger'], "
+                    "[class*='invalid-feedback'], .error, #error"
+                )
+                visible_errors = [e for e in error_els if e.is_visible()]
+                if visible_errors:
+                    msg = visible_errors[0].inner_text().strip()
+                    result.message = f"Erro de login: {msg}" if msg else "Credenciais inválidas."
+                    return result
+            except Exception:
+                pass
 
-            body_text = page.inner_text("body").lower()
-            failure_phrases = [
-                "senha incorreta", "usuário não encontrado",
-                "invalid credentials", "inválido", "não autorizado",
-            ]
-            if any(ph in body_text for ph in failure_phrases):
-                result.message = "Credenciais inválidas. Verifique TELEPORT_USERNAME e TELEPORT_PASSWORD."
-                return result
+            try:
+                body_text = page.inner_text("body").lower()
+                failure_phrases = [
+                    "senha incorreta", "usuário não encontrado",
+                    "invalid credentials", "inválido", "não autorizado",
+                ]
+                if any(ph in body_text for ph in failure_phrases):
+                    result.message = "Credenciais inválidas. Verifique TELEPORT_USERNAME e TELEPORT_PASSWORD."
+                    return result
+            except Exception:
+                pass
 
             report("Login realizado com sucesso!", 0.15)
             result.success = True
@@ -344,8 +374,11 @@ def _run_playwright(
                         if navigated:
                             break
 
-                page.wait_for_timeout(2_000)
-                page.remove_listener("response", _on_response)
+                _safe_wait(page, timeout=5_000)
+                try:
+                    page.remove_listener("response", _on_response)
+                except Exception:
+                    pass
 
                 if not navigated:
                     result.errors[key] = f"Não foi possível navegar para {sec['label']}"
@@ -357,8 +390,8 @@ def _run_playwright(
                     try:
                         btn = page.locator(f"button:text-matches('{btn_text}', 'i')").first
                         if btn.is_visible(timeout=600):
-                            btn.click()
-                            page.wait_for_timeout(2_000)
+                            with page.expect_navigation(wait_until="networkidle", timeout=10_000):
+                                btn.click()
                             break
                     except Exception:
                         pass
