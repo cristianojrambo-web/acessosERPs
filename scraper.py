@@ -170,49 +170,28 @@ def _df_from_json_responses(captured: list[dict]) -> pd.DataFrame | None:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def scrape_teleport(
-    headless: bool = True,
-    sections: list[str] | None = None,
-    progress_callback: Callable[[str, float], None] | None = None,
-    max_rows: int = 500,
+def _run_playwright(
+    username: str,
+    password: str,
+    base_url: str,
+    to_scrape: list[str],
+    headless: bool,
+    max_rows: int,
+    progress_callback: Callable[[str, float], None] | None,
 ) -> ScraperResult:
     """
-    Faz login no Teleport ERP e extrai dados das seções indicadas.
-
-    Args:
-        headless: Se True, executa sem abrir janela do browser.
-        sections: Lista de chaves de SECTIONS a importar (None = todas).
-        progress_callback: Callable(mensagem, 0.0–1.0) para atualizar progresso.
-        max_rows: Limite de linhas por seção.
-
-    Returns:
-        ScraperResult com .success, .dataframes e .errors.
+    Executa o Playwright em uma thread isolada.
+    Configura WindowsSelectorEventLoopPolicy no Windows para evitar conflito
+    com o event loop do Streamlit (NotImplementedError no asyncio).
     """
-    try:
-        from playwright.sync_api import sync_playwright  # lazy import
-    except ImportError:
-        return ScraperResult(
-            success=False,
-            message=(
-                "Playwright não instalado.\n"
-                "Execute: pip install playwright && playwright install chromium"
-            ),
-        )
+    import sys
+    import asyncio
 
-    username = TELEPORT_USERNAME
-    password = TELEPORT_PASSWORD
-    base_url = TELEPORT_URL.rstrip("/")
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    if not username or not password:
-        return ScraperResult(
-            success=False,
-            message=(
-                "Credenciais não configuradas. "
-                "Adicione TELEPORT_USERNAME e TELEPORT_PASSWORD ao arquivo .env"
-            ),
-        )
+    from playwright.sync_api import sync_playwright
 
-    to_scrape = [s for s in (sections or list(SECTIONS.keys())) if s in SECTIONS]
     result = ScraperResult()
 
     def report(msg: str, pct: float) -> None:
@@ -408,3 +387,66 @@ def scrape_teleport(
             browser.close()
 
     return result
+
+
+def scrape_teleport(
+    headless: bool = True,
+    sections: list[str] | None = None,
+    progress_callback: Callable[[str, float], None] | None = None,
+    max_rows: int = 500,
+) -> ScraperResult:
+    """
+    Faz login no Teleport ERP e extrai dados das seções indicadas.
+    Executa o Playwright em thread separada para compatibilidade com Windows/Streamlit.
+    """
+    try:
+        import playwright  # noqa: F401 — verify installed
+    except ImportError:
+        return ScraperResult(
+            success=False,
+            message=(
+                "Playwright não instalado.\n"
+                "Execute: pip install playwright && playwright install chromium"
+            ),
+        )
+
+    username = TELEPORT_USERNAME
+    password = TELEPORT_PASSWORD
+    base_url = TELEPORT_URL.rstrip("/")
+
+    if not username or not password:
+        return ScraperResult(
+            success=False,
+            message=(
+                "Credenciais não configuradas. "
+                "Adicione TELEPORT_USERNAME e TELEPORT_PASSWORD ao arquivo .env"
+            ),
+        )
+
+    to_scrape = [s for s in (sections or list(SECTIONS.keys())) if s in SECTIONS]
+
+    # Run in a dedicated thread so Playwright can create its own event loop
+    # without conflicting with Streamlit's asyncio loop (fixes NotImplementedError on Windows)
+    import threading
+
+    holder: dict = {}
+
+    def _target():
+        holder["result"] = _run_playwright(
+            username=username,
+            password=password,
+            base_url=base_url,
+            to_scrape=to_scrape,
+            headless=headless,
+            max_rows=max_rows,
+            progress_callback=progress_callback,
+        )
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=300)  # 5-minute max
+
+    if "result" not in holder:
+        return ScraperResult(success=False, message="Tempo limite excedido (5 minutos).")
+
+    return holder["result"]
