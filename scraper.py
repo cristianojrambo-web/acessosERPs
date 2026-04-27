@@ -432,21 +432,31 @@ def scrape_teleport(
     holder: dict = {}
 
     def _target():
-        holder["result"] = _run_playwright(
-            username=username,
-            password=password,
-            base_url=base_url,
-            to_scrape=to_scrape,
-            headless=headless,
-            max_rows=max_rows,
-            progress_callback=progress_callback,
-        )
+        try:
+            holder["result"] = _run_playwright(
+                username=username,
+                password=password,
+                base_url=base_url,
+                to_scrape=to_scrape,
+                headless=headless,
+                max_rows=max_rows,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            logger.exception("Erro na thread do scraper")
+            holder["result"] = ScraperResult(
+                success=False,
+                message=f"Erro interno: {type(exc).__name__}: {exc}",
+            )
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()
     t.join(timeout=300)  # 5-minute max
 
     if "result" not in holder:
-        return ScraperResult(success=False, message="Tempo limite excedido (5 minutos).")
+        return ScraperResult(
+            success=False,
+            message="A importação demorou mais de 5 minutos e foi cancelada.",
+        )
 
     return holder["result"]
