@@ -83,11 +83,10 @@ def _find_and_click_menu(page, keywords: list[str]) -> bool:
                 if el.is_visible(timeout=600):
                     # Use expect_navigation to safely handle page transitions
                     try:
-                        with page.expect_navigation(wait_until="networkidle", timeout=15_000):
+                        with page.expect_navigation(wait_until="domcontentloaded", timeout=8_000):
                             el.click()
                     except Exception:
-                        # Navigation may have already completed — wait a bit
-                        page.wait_for_timeout(2_000)
+                        page.wait_for_timeout(1_500)
                     return True
             except Exception:
                 continue
@@ -226,10 +225,18 @@ def _run_playwright(
         page = ctx.new_page()
 
         try:
+            debug_dir = Path(__file__).parent
+
             # ── Login ──────────────────────────────────────────────────────────
             report("Conectando ao Teleport ERP…", 0.04)
-            page.goto(base_url, wait_until="networkidle", timeout=30_000)
-            page.wait_for_timeout(1_000)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+            page.wait_for_timeout(2_000)
+
+            # Screenshot da tela de login para diagnóstico
+            try:
+                page.screenshot(path=str(debug_dir / "debug_1_login_page.png"))
+            except Exception:
+                pass
 
             report("Preenchendo credenciais…", 0.08)
 
@@ -250,7 +257,7 @@ def _run_playwright(
             for sel in user_selectors:
                 try:
                     el = page.locator(sel).first
-                    if el.is_visible(timeout=500):
+                    if el.is_visible(timeout=800):
                         el.fill(username)
                         filled_user = True
                         break
@@ -258,6 +265,10 @@ def _run_playwright(
                     continue
 
             if not filled_user:
+                try:
+                    page.screenshot(path=str(debug_dir / "debug_1_login_page.png"))
+                except Exception:
+                    pass
                 result.message = "Campo de usuário não encontrado na página de login."
                 return result
 
@@ -291,17 +302,9 @@ def _run_playwright(
             if not submitted:
                 page.locator("input[type='password']").first.press("Enter")
 
-            # Wait for navigation to complete after login
-            login_url = page.url
-            try:
-                # Wait for URL to change (redirect after login)
-                page.wait_for_url(
-                    lambda url: url != login_url,
-                    timeout=25_000,
-                )
-            except Exception:
-                pass
-            _safe_wait(page, timeout=10_000)
+            # Aguarda a página pós-login carregar (sem depender de URL mudar)
+            page.wait_for_timeout(3_000)
+            _safe_wait(page, timeout=8_000)
 
             # Detect login failure — wrap in try/except in case context changes
             try:
@@ -395,8 +398,8 @@ def _run_playwright(
                             f"{base_url}/#!/{kw_plural}",
                         ):
                             try:
-                                page.goto(candidate, wait_until="domcontentloaded", timeout=10_000)
-                                _safe_wait(page, timeout=5_000)
+                                page.goto(candidate, wait_until="domcontentloaded", timeout=8_000)
+                                page.wait_for_timeout(1_500)
                                 if kw in page.url.lower() or kw_plural in page.url.lower():
                                     navigated = True
                                     break
