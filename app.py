@@ -431,6 +431,83 @@ def main():
                 st.rerun()
 
         st.divider()
+
+        # ── Importação direta do Teleport ─────────────────────────────────
+        st.subheader("🔌 Importar do Teleport")
+
+        _teleport_user = os.getenv("TELEPORT_USERNAME", "")
+        _teleport_pass = os.getenv("TELEPORT_PASSWORD", "")
+
+        if not _teleport_user or not _teleport_pass:
+            st.caption(
+                "Configure **TELEPORT_USERNAME** e **TELEPORT_PASSWORD** "
+                "no arquivo `.env` para habilitar a importação direta."
+            )
+        else:
+            st.caption(f"Usuário: **{_teleport_user}**")
+
+            _section_labels = {
+                "clientes": "Clientes",
+                "apolices": "Apólices",
+                "sinistros": "Sinistros",
+                "financeiro": "Financeiro",
+            }
+            _selected_sections = st.multiselect(
+                "Seções:",
+                options=list(_section_labels.keys()),
+                default=list(_section_labels.keys()),
+                format_func=lambda k: _section_labels[k],
+            )
+            _headless = st.checkbox(
+                "Modo invisível",
+                value=True,
+                help="Executa sem abrir a janela do browser",
+            )
+
+            if st.button(
+                "⬇️ Importar do Teleport",
+                use_container_width=True,
+                disabled=not _selected_sections,
+            ):
+                _prog = st.progress(0.0)
+                _status = st.empty()
+
+                def _update_progress(msg: str, pct: float) -> None:
+                    _prog.progress(min(pct, 1.0))
+                    _status.caption(msg)
+
+                try:
+                    from scraper import scrape_teleport
+                    _result = scrape_teleport(
+                        headless=_headless,
+                        sections=_selected_sections,
+                        progress_callback=_update_progress,
+                    )
+                except Exception as _exc:
+                    _result = None
+                    st.error(f"Erro ao importar: {_exc}")
+
+                _prog.empty()
+                _status.empty()
+
+                if _result is not None:
+                    if _result.success and _result.dataframes:
+                        for _name, _df in _result.dataframes.items():
+                            st.session_state.dataframes[_name] = _df
+                        st.success(
+                            f"✅ {len(_result.dataframes)} seção(ões) importada(s)!"
+                        )
+                        for _err in _result.errors.values():
+                            st.warning(f"⚠️ {_err}")
+                        st.rerun()
+                    elif _result.success and not _result.dataframes:
+                        st.warning("Conexão OK, mas nenhum dado foi encontrado.")
+                        for _err in _result.errors.values():
+                            st.warning(f"⚠️ {_err}")
+                    else:
+                        st.error(_result.message or "Falha na importação.")
+
+        st.divider()
         st.caption(
             "💡 **Como exportar do Teleport:** acesse o relatório desejado, "
             "clique em exportar e escolha CSV ou Excel."
