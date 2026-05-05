@@ -321,10 +321,15 @@ def process_message(user_message: str) -> str:
 
 def save_dataframe(name: str, df: pd.DataFrame) -> None:
     df = df.copy()
-    # Colunas object com tipos misturados causam ArrowTypeError — converte para string
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].where(df[col].isna(), df[col].astype(str))
-    df.to_parquet(DATA_DIR / f"{name}.parquet", index=False)
+    try:
+        df.to_parquet(DATA_DIR / f"{name}.parquet", index=False)
+    except Exception:
+        # Fallback: converte tudo para string se ainda houver tipo incompatível
+        for col in df.columns:
+            df[col] = df[col].fillna("").astype(str)
+        df.to_parquet(DATA_DIR / f"{name}.parquet", index=False)
 
 
 def load_saved_dataframes() -> dict[str, tuple[pd.DataFrame, str]]:
