@@ -100,7 +100,7 @@ SECTION_MAP = {
 }
 
 
-def _query_teleport(section: str) -> str:
+def _query_teleport(section: str, search: str = "") -> str:
     """Executa o scraper como subprocesso e retorna os dados da seção."""
     scraper_path = Path(__file__).parent / "scraper.py"
 
@@ -114,6 +114,7 @@ def _query_teleport(section: str) -> str:
         "--worker", output_file,
         "--headless",
         "--max-rows", "200",
+        "--search", search,
         section,
     ]
 
@@ -164,7 +165,8 @@ def _query_teleport(section: str) -> str:
 def execute_tool(tool_name: str, tool_input: dict) -> str:
     section = SECTION_MAP.get(tool_name)
     if section:
-        return _query_teleport(section)
+        busca = tool_input.get("busca", "")
+        return _query_teleport(section, busca)
     return f"Ferramenta '{tool_name}' não reconhecida."
 
 

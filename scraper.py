@@ -29,19 +29,19 @@ TELEPORT_PASSWORD = os.getenv("TELEPORT_PASSWORD", "")
 SECTIONS: dict[str, dict] = {
     "clientes": {
         "label": "Clientes",
-        "keywords": ["cliente", "segurado", "tomador"],
+        "keywords": ["Pesquisar Clientes", "Clientes"],
     },
     "apolices": {
-        "label": "Apólices",
-        "keywords": ["apólice", "apolice", "proposta"],
+        "label": "Produção",
+        "keywords": ["Produção", "Producao"],
     },
     "sinistros": {
         "label": "Sinistros",
-        "keywords": ["sinistro", "aviso"],
+        "keywords": ["Sinistro", "Sinistros", "Aviso"],
     },
     "financeiro": {
         "label": "Financeiro",
-        "keywords": ["financeiro", "comissão", "comissao", "repasse", "extrato"],
+        "keywords": ["Evolução de Carteira", "Financeiro", "Relatórios"],
     },
 }
 
@@ -66,27 +66,25 @@ def _safe_wait(page, timeout: int = 5_000) -> None:
 
 
 def _find_and_click_menu(page, keywords: list[str]) -> bool:
-    """Clicks the first visible nav link that matches any keyword."""
+    """
+    Clicks the first visible menu item matching any keyword.
+    Teleport is a SPA — links have empty href and trigger JS handlers,
+    so there is NO navigation event. Just click and wait for content to render.
+    """
     for kw in keywords:
         candidates = [
-            f"nav a:text-matches('{kw}', 'i')",
-            f"[role='navigation'] a:text-matches('{kw}', 'i')",
-            f"[class*='menu'] a:text-matches('{kw}', 'i')",
-            f"[class*='sidebar'] a:text-matches('{kw}', 'i')",
-            f"[class*='nav'] a:text-matches('{kw}', 'i')",
+            f"text='{kw}'",
+            f"a:text('{kw}')",
             f"a:text-matches('{kw}', 'i')",
             f"button:text-matches('{kw}', 'i')",
+            f"li:text-matches('{kw}', 'i')",
         ]
         for sel in candidates:
             try:
                 el = page.locator(sel).first
-                if el.is_visible(timeout=600):
-                    # Use expect_navigation to safely handle page transitions
-                    try:
-                        with page.expect_navigation(wait_until="domcontentloaded", timeout=8_000):
-                            el.click()
-                    except Exception:
-                        page.wait_for_timeout(1_500)
+                if el.is_visible(timeout=800):
+                    el.click()
+                    page.wait_for_timeout(2_500)
                     return True
             except Exception:
                 continue
@@ -191,6 +189,7 @@ def _run_playwright(
     headless: bool,
     max_rows: int,
     progress_callback: Callable[[str, float], None] | None,
+    search: str = "",
 ) -> ScraperResult:
     """
     Executa o Playwright em uma thread isolada.
@@ -421,13 +420,27 @@ def _run_playwright(
                     report(f"  ⚠ {sec['label']}: seção não encontrada", p1)
                     continue
 
-                # Trigger search/list to populate data if needed
-                for btn_text in ["Buscar", "Pesquisar", "Listar", "Ver todos", "Todos"]:
+                # Fill search term if provided (SPA: no navigation, just type + click)
+                if search:
+                    try:
+                        search_input = page.locator(
+                            "input[type='text']:visible, input[type='search']:visible, "
+                            "input[placeholder*='buscar']:visible, input[placeholder*='pesquisar']:visible, "
+                            "input[placeholder*='nome']:visible"
+                        ).first
+                        if search_input.is_visible(timeout=1_500):
+                            search_input.fill(search)
+                            page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+
+                # Click search/list button (SPA: no navigation event)
+                for btn_text in ["Buscar", "Pesquisar", "Listar", "Ver todos", "Todos", "Filtrar"]:
                     try:
                         btn = page.locator(f"button:text-matches('{btn_text}', 'i')").first
                         if btn.is_visible(timeout=600):
-                            with page.expect_navigation(wait_until="networkidle", timeout=10_000):
-                                btn.click()
+                            btn.click()
+                            page.wait_for_timeout(2_500)
                             break
                     except Exception:
                         pass
@@ -604,6 +617,7 @@ if __name__ == "__main__":
                         help="Path to JSON output file")
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--max-rows", type=int, default=500)
+    parser.add_argument("--search", default="", help="Termo de busca para filtrar resultados")
     parser.add_argument("sections", nargs="*", default=list(SECTIONS.keys()))
     args = parser.parse_args()
     _log(f"args: headless={args.headless} sections={args.sections}")
@@ -612,7 +626,7 @@ if __name__ == "__main__":
         _log(f"  progresso: {msg} ({pct:.0%})")
         print(json.dumps({"msg": msg, "pct": pct}), flush=True)
 
-    _log("chamando _run_playwright...")
+    _log(f"chamando _run_playwright... search='{args.search}'")
     res = _run_playwright(
         username=TELEPORT_USERNAME,
         password=TELEPORT_PASSWORD,
@@ -621,6 +635,7 @@ if __name__ == "__main__":
         headless=args.headless,
         max_rows=args.max_rows,
         progress_callback=_progress,
+        search=args.search,
     )
 
     output = {
