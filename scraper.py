@@ -507,16 +507,18 @@ def scrape_teleport(
     cmd += to_scrape
 
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.run(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
+            timeout=90,
             cwd=str(Path(__file__).parent),
         )
 
-        # Stream progress lines from the subprocess stdout
-        for line in proc.stdout:
+        stderr_output = proc.stderr.strip()
+
+        # Parse progress lines from stdout (for logging)
+        for line in proc.stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -525,16 +527,11 @@ def scrape_teleport(
                 if progress_callback and "msg" in msg:
                     progress_callback(msg["msg"], float(msg.get("pct", 0)))
             except Exception:
-                pass  # non-JSON output — ignore
+                pass
 
-        stderr_output = proc.stderr.read()
-        proc.wait(timeout=290)
-
-        # Check if output file has content
-        file_size = os.path.getsize(output_file)
-        if file_size == 0:
-            error_detail = stderr_output.strip() if stderr_output.strip() else "Subprocesso encerrou sem gravar resultado."
-            return ScraperResult(success=False, message=f"Falha no worker:\n{error_detail}")
+        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            detail = stderr_output or proc.stdout.strip() or "Worker encerrou sem gravar resultado."
+            return ScraperResult(success=False, message=f"Falha no worker:\n{detail}")
 
         with open(output_file, encoding="utf-8") as f:
             data = json.load(f)
@@ -549,9 +546,11 @@ def scrape_teleport(
 
         return result
 
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return ScraperResult(success=False, message="A importação demorou mais de 5 minutos e foi cancelada.")
+    except subprocess.TimeoutExpired as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.output or "").strip()
+        detail = stderr or stdout or "sem saída"
+        return ScraperResult(success=False, message=f"Timeout (90s).\nÚltima saída:\n{detail}")
     except FileNotFoundError as exc:
         return ScraperResult(success=False, message=f"Arquivo de resultado não encontrado: {exc}")
     except Exception as exc:
@@ -569,12 +568,36 @@ if __name__ == "__main__":
     import sys
     import json
     import argparse
+    import datetime
+    from pathlib import Path as _Path
+
+    _log_path = _Path(__file__).parent / "debug_scraper.log"
+
+    def _log(msg: str) -> None:
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        try:
+            with open(_log_path, "a", encoding="utf-8") as _lf:
+                _lf.write(line)
+        except Exception:
+            pass
+
+    _log("=== worker iniciado ===")
+    _log(f"Python: {sys.version}")
 
     # Garante ProactorEventLoop antes de qualquer importação do Playwright
     if sys.platform == "win32":
         import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
         asyncio.set_event_loop(asyncio.ProactorEventLoop())
+        _log("ProactorEventLoop configurado")
+
+    _log("importando playwright...")
+    try:
+        from playwright.sync_api import sync_playwright as _check_pw  # noqa
+        _log("playwright importado ok")
+    except Exception as _e:
+        _log(f"ERRO ao importar playwright: {_e}")
 
     parser = argparse.ArgumentParser(description="Teleport scraper worker")
     parser.add_argument("--worker", required=True, metavar="OUTPUT_FILE",
@@ -583,10 +606,13 @@ if __name__ == "__main__":
     parser.add_argument("--max-rows", type=int, default=500)
     parser.add_argument("sections", nargs="*", default=list(SECTIONS.keys()))
     args = parser.parse_args()
+    _log(f"args: headless={args.headless} sections={args.sections}")
 
     def _progress(msg: str, pct: float) -> None:
+        _log(f"  progresso: {msg} ({pct:.0%})")
         print(json.dumps({"msg": msg, "pct": pct}), flush=True)
 
+    _log("chamando _run_playwright...")
     res = _run_playwright(
         username=TELEPORT_USERNAME,
         password=TELEPORT_PASSWORD,
@@ -607,7 +633,10 @@ if __name__ == "__main__":
         },
     }
 
+    _log(f"_run_playwright concluído: success={res.success} msg={res.message[:80]}")
+
     with open(args.worker, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, default=str)
 
+    _log("resultado gravado. encerrando.")
     sys.exit(0 if res.success else 1)
