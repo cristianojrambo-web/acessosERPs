@@ -199,6 +199,8 @@ def _run_playwright(
     """
     import sys
     import asyncio
+    import json
+    from pathlib import Path
 
     if sys.platform == "win32":
         # ProactorEventLoop é obrigatório no Windows para criar subprocessos
