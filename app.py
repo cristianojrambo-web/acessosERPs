@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 SYSTEM_PROMPT = """Você é um assistente especializado em análise de dados para corretoras de seguros. \
-Você tem acesso direto ao sistema ERP Teleport via ferramentas integradas — não precisa que o usuário exporte nada.
+Você tem acesso a dados exportados do sistema ERP Teleport carregados pelo usuário.
 
 Suas especialidades:
 - Análise de apólices e sinistros
@@ -27,147 +27,217 @@ Suas especialidades:
 - Relatórios gerenciais e resumos executivos
 
 Instruções:
-1. Use SEMPRE as ferramentas para buscar dados do Teleport antes de responder
+1. Use SEMPRE as ferramentas disponíveis para buscar dados antes de responder
 2. Baseie suas respostas exclusivamente nos dados reais retornados pelas ferramentas
 3. Formate valores monetários no padrão brasileiro (R$ 1.234,56)
-4. Responda em português brasileiro
-5. Se uma ferramenta retornar erro de login ou conexão, informe o usuário claramente"""
+4. Datas no formato brasileiro (DD/MM/AAAA)
+5. Responda em português brasileiro
+6. Quando não encontrar dados relevantes, informe claramente"""
 
 TOOLS = [
     {
-        "name": "buscar_clientes",
-        "description": "Busca clientes e segurados no Teleport ERP. Use para encontrar informações sobre clientes específicos ou listar todos.",
+        "name": "listar_tabelas",
+        "description": "Lista todas as tabelas carregadas com total de registros e colunas disponíveis",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "obter_info_tabela",
+        "description": "Obtém informações detalhadas de uma tabela: colunas, tipos e amostra de registros",
         "input_schema": {
             "type": "object",
             "properties": {
-                "busca": {
-                    "type": "string",
-                    "description": "Termo de busca: nome, CPF, CNPJ ou email. Deixe vazio para listar todos."
-                }
+                "nome_tabela": {"type": "string", "description": "Nome exato da tabela"}
             },
-            "required": []
+            "required": ["nome_tabela"]
         }
     },
     {
-        "name": "buscar_apolices",
-        "description": "Busca apólices de seguro no Teleport ERP. Use para consultar apólices ativas, vencidas, por cliente ou seguradora.",
+        "name": "consultar_dados",
+        "description": "Filtra e retorna registros de uma tabela. Use para buscas específicas.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "busca": {
+                "nome_tabela": {"type": "string"},
+                "filtro": {
                     "type": "string",
-                    "description": "Número da apólice, nome do segurado, seguradora ou status. Vazio para listar todas."
-                }
+                    "description": "Filtro pandas query. Ex: 'Nome.str.contains(\"Cristiano\", case=False)' ou 'Status == \"Ativo\"'"
+                },
+                "colunas": {"type": "array", "items": {"type": "string"}},
+                "limite": {"type": "integer", "description": "Máximo de linhas (padrão 50)"},
+                "ordenar_por": {"type": "string"},
+                "ordem_decrescente": {"type": "boolean"}
             },
-            "required": []
+            "required": ["nome_tabela"]
         }
     },
     {
-        "name": "buscar_sinistros",
-        "description": "Busca sinistros no Teleport ERP.",
+        "name": "agregar_dados",
+        "description": "Agrupa e sumariza dados: totais, médias, contagens por categoria",
         "input_schema": {
             "type": "object",
             "properties": {
-                "busca": {
+                "nome_tabela": {"type": "string"},
+                "agrupar_por": {"type": "array", "items": {"type": "string"}},
+                "operacao": {
                     "type": "string",
-                    "description": "Número do sinistro, nome do segurado ou status. Vazio para listar todos."
-                }
+                    "enum": ["sum", "count", "mean", "min", "max", "nunique"]
+                },
+                "coluna_valor": {"type": "string"},
+                "filtro": {"type": "string"}
             },
-            "required": []
+            "required": ["nome_tabela", "agrupar_por", "operacao"]
         }
     },
     {
-        "name": "consultar_financeiro",
-        "description": "Consulta dados financeiros no Teleport ERP: comissões a receber, repasses, extratos.",
+        "name": "calcular_estatisticas",
+        "description": "Calcula estatísticas descritivas de colunas numéricas",
         "input_schema": {
             "type": "object",
             "properties": {
-                "busca": {
-                    "type": "string",
-                    "description": "Período, tipo de comissão ou termo de busca. Vazio para listar tudo."
-                }
+                "nome_tabela": {"type": "string"},
+                "colunas": {"type": "array", "items": {"type": "string"}},
+                "filtro": {"type": "string"}
             },
-            "required": []
+            "required": ["nome_tabela", "colunas"]
         }
     }
 ]
 
-SECTION_MAP = {
-    "buscar_clientes": "clientes",
-    "buscar_apolices": "apolices",
-    "buscar_sinistros": "sinistros",
-    "consultar_financeiro": "financeiro",
-}
-
-
-def _query_teleport(section: str, search: str = "") -> str:
-    """Executa o scraper como subprocesso e retorna os dados da seção."""
-    scraper_path = Path(__file__).parent / "scraper.py"
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-    tmp.close()
-    output_file = tmp.name
-
-    cmd = [
-        sys.executable,
-        str(scraper_path),
-        "--worker", output_file,
-        "--headless",
-        "--max-rows", "200",
-        "--search", search,
-        section,
-    ]
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(Path(__file__).parent),
-        )
-
-        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
-            detail = proc.stderr.strip() or proc.stdout.strip() or "Worker encerrou sem gravar resultado."
-            return f"Erro ao acessar {section} no Teleport:\n{detail}"
-
-        with open(output_file, encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not data.get("success"):
-            return f"Falha ao consultar {section}: {data.get('message', 'Erro desconhecido')}"
-
-        dfs_data = data.get("dataframes", {})
-        if not dfs_data:
-            errors = data.get("errors", {})
-            err_msg = "; ".join(errors.values()) if errors else "Sem dados disponíveis."
-            return f"Nenhum dado encontrado em {section}. {err_msg}"
-
-        parts = []
-        for name, records in dfs_data.items():
-            parts.append(
-                f"**{name}** — {len(records)} registros:\n"
-                f"```json\n{json.dumps(records[:100], ensure_ascii=False, indent=2, default=str)}\n```"
-            )
-        return "\n\n".join(parts)
-
-    except subprocess.TimeoutExpired:
-        return f"A consulta a {section} no Teleport demorou mais de 2 minutos e foi cancelada."
-    except Exception as exc:
-        return f"Erro ao consultar Teleport ({section}): {type(exc).__name__}: {exc}"
-    finally:
-        try:
-            os.unlink(output_file)
-        except Exception:
-            pass
-
 
 def execute_tool(tool_name: str, tool_input: dict) -> str:
-    section = SECTION_MAP.get(tool_name)
-    if section:
-        busca = tool_input.get("busca", "")
-        return _query_teleport(section, busca)
-    return f"Ferramenta '{tool_name}' não reconhecida."
+    dfs: dict[str, pd.DataFrame] = st.session_state.get("dataframes", {})
+
+    try:
+        if tool_name == "listar_tabelas":
+            if not dfs:
+                return "Nenhuma tabela carregada ainda."
+            linhas = [f"- **{n}**: {len(df):,} registros, {len(df.columns)} colunas" for n, df in dfs.items()]
+            return "Tabelas disponíveis:\n" + "\n".join(linhas)
+
+        elif tool_name == "obter_info_tabela":
+            nome = tool_input["nome_tabela"]
+            if nome not in dfs:
+                return f"Tabela '{nome}' não encontrada. Use listar_tabelas."
+            df = dfs[nome]
+            info = {
+                "total_registros": len(df),
+                "colunas": {col: {"tipo": str(df[col].dtype), "nulos": int(df[col].isnull().sum())} for col in df.columns}
+            }
+            sample = df.head(3).to_dict(orient="records")
+            return (
+                f"**'{nome}'** — {len(df):,} registros\n"
+                f"```json\n{json.dumps(info, ensure_ascii=False, indent=2)}\n```\n"
+                f"**Amostra:**\n```json\n{json.dumps(sample, ensure_ascii=False, indent=2, default=str)}\n```"
+            )
+
+        elif tool_name == "consultar_dados":
+            nome = tool_input["nome_tabela"]
+            if nome not in dfs:
+                return f"Tabela '{nome}' não encontrada."
+            df = dfs[nome].copy()
+
+            filtro = tool_input.get("filtro")
+            if filtro:
+                try:
+                    df = df.query(filtro, engine="python")
+                except Exception as e:
+                    return f"Erro no filtro '{filtro}': {e}\nColunas disponíveis: {list(dfs[nome].columns)}"
+
+            colunas = tool_input.get("colunas") or []
+            if colunas:
+                validas = [c for c in colunas if c in df.columns]
+                if validas:
+                    df = df[validas]
+
+            ordenar_por = tool_input.get("ordenar_por")
+            if ordenar_por and ordenar_por in df.columns:
+                df = df.sort_values(by=ordenar_por, ascending=not tool_input.get("ordem_decrescente", False))
+
+            limite = min(tool_input.get("limite", 50), 200)
+            total = len(df)
+            records = df.head(limite).to_dict(orient="records")
+            return (
+                f"**{total:,} registros encontrados** (exibindo {len(records)}):\n"
+                f"```json\n{json.dumps(records, ensure_ascii=False, indent=2, default=str)}\n```"
+            )
+
+        elif tool_name == "agregar_dados":
+            nome = tool_input["nome_tabela"]
+            if nome not in dfs:
+                return f"Tabela '{nome}' não encontrada."
+            df = dfs[nome].copy()
+
+            filtro = tool_input.get("filtro")
+            if filtro:
+                try:
+                    df = df.query(filtro, engine="python")
+                except Exception as e:
+                    return f"Erro no filtro: {e}"
+
+            agrupar_por = tool_input["agrupar_por"]
+            operacao = tool_input["operacao"]
+            coluna_valor = tool_input.get("coluna_valor")
+
+            for col in agrupar_por:
+                if col not in df.columns:
+                    return f"Coluna '{col}' não encontrada. Disponíveis: {list(df.columns)}"
+
+            grouped = df.groupby(agrupar_por)
+            op_map = {"sum": "sum", "mean": "mean", "min": "min", "max": "max", "nunique": "nunique"}
+
+            if operacao == "count":
+                result_df = grouped.size().reset_index(name="contagem")
+            elif coluna_valor:
+                if coluna_valor not in df.columns:
+                    return f"Coluna '{coluna_valor}' não encontrada."
+                result_df = grouped[coluna_valor].agg(op_map[operacao]).reset_index()
+            else:
+                numericas = [c for c in df.select_dtypes(include="number").columns if c not in agrupar_por]
+                if not numericas:
+                    return "Nenhuma coluna numérica encontrada. Especifique 'coluna_valor'."
+                result_df = grouped[numericas].agg(op_map[operacao]).reset_index()
+
+            result_df = result_df.sort_values(result_df.columns[-1], ascending=False)
+            records = result_df.to_dict(orient="records")
+            return f"**Resultado ({operacao}):**\n```json\n{json.dumps(records, ensure_ascii=False, indent=2, default=str)}\n```"
+
+        elif tool_name == "calcular_estatisticas":
+            nome = tool_input["nome_tabela"]
+            if nome not in dfs:
+                return f"Tabela '{nome}' não encontrada."
+            df = dfs[nome].copy()
+
+            filtro = tool_input.get("filtro")
+            if filtro:
+                try:
+                    df = df.query(filtro, engine="python")
+                except Exception as e:
+                    return f"Erro no filtro: {e}"
+
+            colunas = [c for c in tool_input["colunas"] if c in df.columns]
+            if not colunas:
+                return f"Nenhuma coluna válida. Disponíveis: {list(df.columns)}"
+
+            stats = {}
+            for col in colunas:
+                try:
+                    stats[col] = {
+                        "total": float(df[col].sum()),
+                        "média": float(df[col].mean()),
+                        "mínimo": float(df[col].min()),
+                        "máximo": float(df[col].max()),
+                        "mediana": float(df[col].median()),
+                        "nulos": int(df[col].isnull().sum()),
+                    }
+                except Exception:
+                    stats[col] = {"erro": "Coluna não numérica"}
+
+            return f"**Estatísticas:**\n```json\n{json.dumps(stats, ensure_ascii=False, indent=2)}\n```"
+
+        return f"Ferramenta '{tool_name}' não reconhecida."
+
+    except Exception as e:
+        return f"Erro ao executar '{tool_name}': {e}"
 
 
 def content_to_dict(content) -> list[dict]:
@@ -189,12 +259,7 @@ def get_display_text(content) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block["text"])
-            elif hasattr(block, "type") and block.type == "text":
-                parts.append(block.text)
+        parts = [b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"]
         return "\n".join(parts)
     return str(content)
 
@@ -234,17 +299,7 @@ def process_message(user_message: str) -> str:
             tool_results = []
             for block in assistant_content:
                 if block.get("type") == "tool_use":
-                    tool_name = block["name"]
-                    # Show which section is being queried
-                    section_label = {
-                        "buscar_clientes": "Clientes",
-                        "buscar_apolices": "Apólices",
-                        "buscar_sinistros": "Sinistros",
-                        "consultar_financeiro": "Financeiro",
-                    }.get(tool_name, tool_name)
-                    st.caption(f"🔍 Consultando {section_label} no Teleport…")
-
-                    result = execute_tool(tool_name, block["input"])
+                    result = execute_tool(block["name"], block["input"])
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block["id"],
@@ -257,54 +312,86 @@ def process_message(user_message: str) -> str:
     return final_text
 
 
+def load_file(uploaded_file) -> pd.DataFrame | None:
+    name = uploaded_file.name.lower()
+    try:
+        if name.endswith(".csv"):
+            for enc in ("utf-8", "latin-1", "cp1252"):
+                try:
+                    uploaded_file.seek(0)
+                    return pd.read_csv(uploaded_file, encoding=enc, sep=None, engine="python")
+                except UnicodeDecodeError:
+                    continue
+        elif name.endswith((".xlsx", ".xls")):
+            return pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.error(f"Erro ao ler {uploaded_file.name}: {e}")
+    return None
+
+
 def main():
     if "api_messages" not in st.session_state:
         st.session_state.api_messages = []
+    if "dataframes" not in st.session_state:
+        st.session_state.dataframes = {}
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.title("📊 Chat ERP Teleport")
+        st.title("📂 Dados do Teleport")
 
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        teleport_user = os.getenv("TELEPORT_USERNAME", "")
-        teleport_pass = os.getenv("TELEPORT_PASSWORD", "")
+        uploaded_files = st.file_uploader(
+            "Arraste os arquivos XLS/CSV exportados do Teleport",
+            type=["csv", "xlsx", "xls"],
+            accept_multiple_files=True,
+        )
 
-        if api_key and teleport_user and teleport_pass:
-            st.success(f"✅ Conectado como **{teleport_user}**")
-        else:
-            if not api_key:
-                st.error("❌ ANTHROPIC_API_KEY não configurada")
-            if not teleport_user or not teleport_pass:
-                st.warning("⚠️ Credenciais do Teleport não configuradas")
-            st.caption("Configure o arquivo `.env` com as credenciais necessárias.")
+        if uploaded_files:
+            for f in uploaded_files:
+                key = os.path.splitext(f.name)[0]
+                if key not in st.session_state.dataframes:
+                    df = load_file(f)
+                    if df is not None:
+                        st.session_state.dataframes[key] = df
+                        st.success(f"✅ **{f.name}** — {len(df):,} registros")
 
-        st.divider()
-        st.markdown("""
-**Como usar:**
-Faça perguntas em português sobre seus dados. O sistema acessa o Teleport automaticamente.
-
-**Exemplos:**
-- "Quantas apólices ativas tenho?"
-- "Liste meus clientes"
-- "Qual o total de comissões a receber?"
-- "Mostre os sinistros em aberto"
-- "Quais apólices vencem esse mês?"
-        """)
-
-        if st.session_state.api_messages:
+        if st.session_state.dataframes:
             st.divider()
-            if st.button("🔄 Nova conversa", use_container_width=True):
+            st.subheader("Tabelas carregadas")
+            for name, df in st.session_state.dataframes.items():
+                with st.expander(f"📋 {name} ({len(df):,} registros)"):
+                    st.dataframe(df.head(5), use_container_width=True)
+
+            st.divider()
+            col1, col2 = st.columns(2)
+            if col1.button("🗑️ Limpar dados", use_container_width=True):
+                st.session_state.dataframes = {}
+                st.session_state.api_messages = []
+                st.rerun()
+            if col2.button("🔄 Nova conversa", use_container_width=True):
                 st.session_state.api_messages = []
                 st.rerun()
 
     # ── Main chat ─────────────────────────────────────────────────────────────
-    st.title("💬 Chat com ERP Teleport")
+    st.title("💬 Chat com dados ERP Teleport")
 
-    if not os.getenv("ANTHROPIC_API_KEY") or not os.getenv("TELEPORT_USERNAME"):
-        st.warning("Configure o arquivo `.env` com as credenciais para começar.")
+    if not st.session_state.dataframes:
+        st.info("👈 Faça upload dos arquivos exportados do Teleport para começar.")
+        st.markdown("""
+### Como usar:
+1. No Teleport, exporte os relatórios desejados (XLS ou CSV)
+2. Arraste os arquivos para a barra lateral
+3. Faça perguntas em português sobre seus dados
+
+### Exemplos de perguntas:
+- "Quantos clientes com nome Cristiano eu tenho?"
+- "Qual o total de prêmios por seguradora?"
+- "Liste as apólices que vencem esse mês"
+- "Qual a comissão total do último trimestre?"
+- "Mostre os 10 maiores clientes por volume de apólices"
+        """)
         return
 
-    # Display conversation
+    # Exibe conversa
     for msg in st.session_state.api_messages:
         role = msg["role"]
         content = msg["content"]
@@ -317,11 +404,11 @@ Faça perguntas em português sobre seus dados. O sistema acessa o Teleport auto
         with st.chat_message(role):
             st.markdown(text)
 
-    if prompt := st.chat_input("Faça uma pergunta sobre seus dados do Teleport…"):
+    if prompt := st.chat_input("Faça uma pergunta sobre seus dados…"):
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
-            with st.spinner("Consultando Teleport…"):
+            with st.spinner("Analisando dados…"):
                 response_text = process_message(prompt)
             st.markdown(response_text)
 
