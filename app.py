@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
 st.set_page_config(
     page_title="Chat ERP Teleport",
     page_icon="📊",
@@ -312,6 +315,24 @@ def process_message(user_message: str) -> str:
     return final_text
 
 
+def save_dataframe(name: str, df: pd.DataFrame) -> None:
+    df.to_parquet(DATA_DIR / f"{name}.parquet", index=False)
+
+
+def load_saved_dataframes() -> dict[str, tuple[pd.DataFrame, str]]:
+    """Returns {name: (df, last_modified_str)}"""
+    result = {}
+    for f in sorted(DATA_DIR.glob("*.parquet")):
+        try:
+            df = pd.read_parquet(f)
+            mtime = f.stat().st_mtime
+            dt = pd.Timestamp(mtime, unit="s").strftime("%d/%m/%Y %H:%M")
+            result[f.stem] = (df, dt)
+        except Exception:
+            pass
+    return result
+
+
 def load_file(uploaded_file) -> pd.DataFrame | None:
     name = uploaded_file.name.lower()
     try:
@@ -334,6 +355,15 @@ def main():
         st.session_state.api_messages = []
     if "dataframes" not in st.session_state:
         st.session_state.dataframes = {}
+    if "data_timestamps" not in st.session_state:
+        st.session_state.data_timestamps = {}
+
+    # Carrega automaticamente dados salvos em disco na primeira execução
+    if not st.session_state.dataframes:
+        saved = load_saved_dataframes()
+        for name, (df, dt) in saved.items():
+            st.session_state.dataframes[name] = df
+            st.session_state.data_timestamps[name] = dt
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -348,17 +378,21 @@ def main():
         if uploaded_files:
             for f in uploaded_files:
                 key = os.path.splitext(f.name)[0]
-                if key not in st.session_state.dataframes:
-                    df = load_file(f)
-                    if df is not None:
-                        st.session_state.dataframes[key] = df
-                        st.success(f"✅ **{f.name}** — {len(df):,} registros")
+                df = load_file(f)
+                if df is not None:
+                    st.session_state.dataframes[key] = df
+                    save_dataframe(key, df)
+                    dt = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M")
+                    st.session_state.data_timestamps[key] = dt
+                    st.success(f"✅ **{f.name}** — {len(df):,} registros")
 
         if st.session_state.dataframes:
             st.divider()
             st.subheader("Tabelas carregadas")
             for name, df in st.session_state.dataframes.items():
-                with st.expander(f"📋 {name} ({len(df):,} registros)"):
+                dt = st.session_state.data_timestamps.get(name, "")
+                label = f"📋 {name} ({len(df):,} registros)" + (f" · {dt}" if dt else "")
+                with st.expander(label):
                     st.dataframe(df.head(5), use_container_width=True)
 
             st.divider()
