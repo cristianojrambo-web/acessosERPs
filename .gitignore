@@ -1,4 +1,9 @@
 .env
 __pycache__/
 *.pyc
+*.log
 .streamlit/secrets.toml
+data/*.parquet
+data/*.xlsx
+data/*.xls
+data/*.png

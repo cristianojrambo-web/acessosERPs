@@ -3,13 +3,17 @@ import pandas as pd
 import anthropic
 import json
 import os
-import sys
-import subprocess
-import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def get_api_key() -> str:
+    try:
+        return st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        return os.getenv("ANTHROPIC_API_KEY", "")
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -268,9 +272,9 @@ def get_display_text(content) -> str:
 
 
 def process_message(user_message: str) -> str:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = get_api_key()
     if not api_key:
-        st.error("ANTHROPIC_API_KEY não configurada no arquivo .env")
+        st.error("ANTHROPIC_API_KEY não configurada. Defina em .env (local) ou em Secrets no Streamlit Cloud.")
         st.stop()
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -369,39 +373,34 @@ def main():
     with st.sidebar:
         st.title("📂 Dados do Teleport")
 
-        uploaded_files = st.file_uploader(
-            "Arraste os arquivos XLS/CSV exportados do Teleport",
-            type=["csv", "xlsx", "xls"],
-            accept_multiple_files=True,
-        )
-
-        if uploaded_files:
-            for f in uploaded_files:
-                key = os.path.splitext(f.name)[0]
-                df = load_file(f)
-                if df is not None:
-                    st.session_state.dataframes[key] = df
-                    save_dataframe(key, df)
-                    dt = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M")
-                    st.session_state.data_timestamps[key] = dt
-                    st.success(f"✅ **{f.name}** — {len(df):,} registros")
+        with st.expander("Atualizar dados (admin)", expanded=not st.session_state.dataframes):
+            uploaded_files = st.file_uploader(
+                "Arraste os arquivos XLS/CSV exportados do Teleport",
+                type=["csv", "xlsx", "xls"],
+                accept_multiple_files=True,
+            )
+            if uploaded_files:
+                for f in uploaded_files:
+                    key = os.path.splitext(f.name)[0]
+                    df = load_file(f)
+                    if df is not None:
+                        st.session_state.dataframes[key] = df
+                        save_dataframe(key, df)
+                        dt = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M")
+                        st.session_state.data_timestamps[key] = dt
+                        st.success(f"✅ **{f.name}** — {len(df):,} registros")
 
         if st.session_state.dataframes:
             st.divider()
-            st.subheader("Tabelas carregadas")
+            st.subheader("Tabelas disponíveis")
             for name, df in st.session_state.dataframes.items():
                 dt = st.session_state.data_timestamps.get(name, "")
-                label = f"📋 {name} ({len(df):,} registros)" + (f" · {dt}" if dt else "")
+                label = f"📋 {name} ({len(df):,} registros)" + (f"\n_{dt}_" if dt else "")
                 with st.expander(label):
                     st.dataframe(df.head(5), use_container_width=True)
 
             st.divider()
-            col1, col2 = st.columns(2)
-            if col1.button("🗑️ Limpar dados", use_container_width=True):
-                st.session_state.dataframes = {}
-                st.session_state.api_messages = []
-                st.rerun()
-            if col2.button("🔄 Nova conversa", use_container_width=True):
+            if st.button("🔄 Nova conversa", use_container_width=True):
                 st.session_state.api_messages = []
                 st.rerun()
 
@@ -409,19 +408,15 @@ def main():
     st.title("💬 Chat com dados ERP Teleport")
 
     if not st.session_state.dataframes:
-        st.info("👈 Faça upload dos arquivos exportados do Teleport para começar.")
+        st.info("Aguardando dados. O administrador deve fazer upload dos arquivos XLS via barra lateral.")
         st.markdown("""
-### Como usar:
-1. No Teleport, exporte os relatórios desejados (XLS ou CSV)
-2. Arraste os arquivos para a barra lateral
-3. Faça perguntas em português sobre seus dados
-
-### Exemplos de perguntas:
-- "Quantos clientes com nome Cristiano eu tenho?"
+### Exemplos de perguntas (após carregar os dados):
+- "Quantos clientes ativos temos?"
 - "Qual o total de prêmios por seguradora?"
 - "Liste as apólices que vencem esse mês"
 - "Qual a comissão total do último trimestre?"
 - "Mostre os 10 maiores clientes por volume de apólices"
+- "Quais clientes têm mais de 3 apólices vigentes?"
         """)
         return
 
